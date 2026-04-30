@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""GMX (and generic IMAP/SMTP) CLI for OpenClaw — email via IMAP/SMTP.
+
+Config: ~/.config/openclaw-email/gmx.json
+  {
+    "username": "you@gmx.de",
+    "password": "your-password",
+    "imap_host": "imap.gmx.net",
+    "imap_port": 993,
+    "smtp_host": "mail.gmx.net",
+    "smtp_port": 587
+  }
+
+Works with any IMAP/SMTP provider. For GMX use the defaults above.
+For other providers update imap_host/smtp_host accordingly.
+
+Run: gmxctl auth   (to save config interactively)
+"""
+import sys, os, json, imaplib, smtplib, email as emaillib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+CONFIG_DIR   = os.path.expanduser("~/.config/openclaw-email")
+TOKEN_FILE   = os.path.join(CONFIG_DIR, "gmx.json")
+DEFAULT_IMAP = ("imap.gmx.net", 993)
+DEFAULT_SMTP = ("mail.gmx.net", 587)
+
+def load_config():
+    if not os.path.exists(TOKEN_FILE):
+        print(f"Config not found: {TOKEN_FILE}\nRun: gmxctl auth", file=sys.stderr)
+        sys.exit(1)
+    with open(TOKEN_FILE) as f:
+        return json.load(f)
+
+def save_config(cfg):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.chmod(TOKEN_FILE, 0o600)
+
+def imap_connect(cfg):
+    conn = imaplib.IMAP4_SSL(cfg.get("imap_host", DEFAULT_IMAP[0]), cfg.get("imap_port", DEFAULT_IMAP[1]))
+    conn.login(cfg["username"], cfg["password"])
+    return conn
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+def cmd_auth(args):
+    import getpass
+    cfg      = load_config() if os.path.exists(TOKEN_FILE) else {}
+    username = input(f"Email address [{cfg.get('username','')}]: ").strip() or cfg.get("username", "")
+    password = getpass.getpass("Password: ")
+    imap_h   = input(f"IMAP host [{DEFAULT_IMAP[0]}]: ").strip() or DEFAULT_IMAP[0]
+    imap_p   = input(f"IMAP port [{DEFAULT_IMAP[1]}]: ").strip() or str(DEFAULT_IMAP[1])
+    smtp_h   = input(f"SMTP host [{DEFAULT_SMTP[0]}]: ").strip() or DEFAULT_SMTP[0]
+    smtp_p   = input(f"SMTP port [{DEFAULT_SMTP[1]}]: ").strip() or str(DEFAULT_SMTP[1])
+
+    cfg.update({
+        "username":  username,
+        "password":  password,
+        "imap_host": imap_h,
+        "imap_port": int(imap_p),
+        "smtp_host": smtp_h,
+        "smtp_port": int(smtp_p),
+    })
+
+    conn = imap_connect(cfg)
+    conn.logout()
+    save_config(cfg)
+    print(f"Connected to {imap_h}. Config saved to {TOKEN_FILE}")
+
+# ── Email ─────────────────────────────────────────────────────────────────────
+
+def cmd_email_list(args):
+    folder = "Sent" if args and args[0] == "sent" else "INBOX"
+    cfg    = load_config()
+    conn   = imap_connect(cfg)
+    conn.select(folder, readonly=True)
+    _, data = conn.search(None, "ALL")
+    ids = data[0].split()[-20:]
+    for uid in reversed(ids):
+        _, msg_data = conn.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+        msg = emaillib.message_from_bytes(msg_data[0][1])
+        read = " "
+        print(f"{read} [{uid.decode():>6}] {msg.get('Date','')[:10]}  {msg.get('From','?')[:35]:<35}  {msg.get('Subject','(no subject)')}")
+    conn.logout()
+
+def cmd_email_read(args):
+    if not args:
+        print("Usage: gmxctl email read <uid>", file=sys.stderr); sys.exit(1)
+    cfg  = load_config()
+    conn = imap_connect(cfg)
+    conn.select("INBOX")
+    _, data = conn.fetch(args[0].encode(), "(RFC822)")
+    msg = emaillib.message_from_bytes(data[0][1])
+    print(f"From:    {msg.get('From','')}")
+    print(f"To:      {msg.get('To','')}")
+    print(f"Subject: {msg.get('Subject','')}")
+    print(f"Date:    {msg.get('Date','')}")
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                body = part.get_payload(decode=True).decode("utf-8", errors="replace")
+                break
+    else:
+        body = msg.get_payload(decode=True).decode("utf-8", errors="replace")
+    print(f"\n{body[:3000]}")
+    conn.logout()
+
+def cmd_email_send(args):
+    import argparse
+    p = argparse.ArgumentParser(prog="gmxctl email send")
+    p.add_argument("--to",      required=True)
+    p.add_argument("--subject", required=True)
+    p.add_argument("--body",    required=True)
+    p.add_argument("--cc",      default="")
+    opts = p.parse_args(args)
+    cfg  = load_config()
+
+    msg = MIMEMultipart()
+    msg["From"]    = cfg["username"]
+    msg["To"]      = opts.to
+    msg["Subject"] = opts.subject
+    if opts.cc:
+        msg["Cc"] = opts.cc
+    msg.attach(MIMEText(opts.body, "plain"))
+
+    with smtplib.SMTP(cfg.get("smtp_host", DEFAULT_SMTP[0]), cfg.get("smtp_port", DEFAULT_SMTP[1])) as s:
+        s.starttls()
+        s.login(cfg["username"], cfg["password"])
+        recipients = [a.strip() for a in opts.to.split(",")] + ([a.strip() for a in opts.cc.split(",")] if opts.cc else [])
+        s.sendmail(cfg["username"], recipients, msg.as_string())
+    print(f"Email sent to {opts.to}")
+
+def cmd_email_draft(args):
+    import argparse
+    p = argparse.ArgumentParser(prog="gmxctl email draft")
+    p.add_argument("--to",      required=True)
+    p.add_argument("--subject", required=True)
+    p.add_argument("--body",    required=True)
+    opts = p.parse_args(args)
+    cfg  = load_config()
+
+    msg = MIMEMultipart()
+    msg["From"]    = cfg["username"]
+    msg["To"]      = opts.to
+    msg["Subject"] = opts.subject
+    msg.attach(MIMEText(opts.body, "plain"))
+
+    conn = imap_connect(cfg)
+    conn.append("Drafts", "\\Draft", imaplib.Time2Internaldate(None), msg.as_bytes())
+    conn.logout()
+    print(f"Draft saved to Drafts folder")
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+
+COMMANDS = {
+    ("auth",):             lambda a: cmd_auth(a),
+    ("email", "list"):     cmd_email_list,
+    ("email", "read"):     cmd_email_read,
+    ("email", "send"):     cmd_email_send,
+    ("email", "draft"):    cmd_email_draft,
+}
+
+if __name__ == "__main__":
+    argv = sys.argv[1:]
+    if not argv:
+        print("Usage: gmxctl <auth|email> <subcommand> [options]")
+        sys.exit(1)
+    key = ("auth",) if argv[0] == "auth" else tuple(argv[:2])
+    fn  = COMMANDS.get(key)
+    if not fn:
+        print(f"Unknown command: {' '.join(argv[:2])}", file=sys.stderr)
+        sys.exit(1)
+    fn(argv[1:] if argv[0] == "auth" else argv[2:])

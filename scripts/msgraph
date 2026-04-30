@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Microsoft Graph API CLI for OpenClaw — email + calendar.
+
+Config: ~/.config/openclaw-email/microsoft.json
+  {
+    "client_id": "your-azure-app-client-id",
+    "client_secret": "your-azure-app-client-secret",
+    "access_token": "...",
+    "refresh_token": "..."
+  }
+
+First-time setup:
+  1. Create an Azure app at https://portal.azure.com → App registrations
+  2. Add redirect URI: http://localhost:9999/callback (for local) or your server URL
+  3. Add API permissions: Mail.ReadWrite, Mail.Send, Calendars.ReadWrite (Delegated)
+  4. Create a client secret
+  5. Run: msgraph auth
+"""
+import sys, os, json, urllib.parse, urllib.request, datetime, webbrowser, http.server, threading, secrets
+
+CONFIG_DIR = os.path.expanduser("~/.config/openclaw-email")
+TOKEN_FILE = os.path.join(CONFIG_DIR, "microsoft.json")
+TENANT     = "consumers"
+TOKEN_URL  = f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/token"
+AUTH_URL   = f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/authorize"
+SCOPES     = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.ReadWrite offline_access"
+REDIRECT   = "http://localhost:9999/callback"
+
+def load_config():
+    if not os.path.exists(TOKEN_FILE):
+        print(f"Config not found: {TOKEN_FILE}\nRun: msgraph auth", file=sys.stderr)
+        sys.exit(1)
+    with open(TOKEN_FILE) as f:
+        return json.load(f)
+
+def save_config(cfg):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.chmod(TOKEN_FILE, 0o600)
+
+def refresh_access_token(cfg):
+    data = urllib.parse.urlencode({
+        "client_id":     cfg["client_id"],
+        "client_secret": cfg["client_secret"],
+        "refresh_token": cfg["refresh_token"],
+        "grant_type":    "refresh_token",
+        "scope":         SCOPES,
+    }).encode()
+    req  = urllib.request.Request(TOKEN_URL, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    resp = json.loads(urllib.request.urlopen(req).read())
+    cfg["access_token"] = resp["access_token"]
+    if "refresh_token" in resp:
+        cfg["refresh_token"] = resp["refresh_token"]
+    save_config(cfg)
+    return cfg["access_token"]
+
+def graph(method, path, body=None):
+    cfg   = load_config()
+    token = cfg["access_token"]
+    url   = f"https://graph.microsoft.com/v1.0{path}"
+    data  = json.dumps(body).encode() if body else None
+    hdrs  = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    req   = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+    try:
+        resp    = urllib.request.urlopen(req)
+        content = resp.read()
+        return json.loads(content) if content else {}
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            token = refresh_access_token(cfg)
+            hdrs["Authorization"] = f"Bearer {token}"
+            req     = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+            resp    = urllib.request.urlopen(req)
+            content = resp.read()
+            return json.loads(content) if content else {}
+        err = e.read()
+        try:
+            err = json.loads(err).get("error", {}).get("message", str(e))
+        except Exception:
+            err = str(e)
+        print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+def cmd_auth(args):
+    """Interactive OAuth2 login. Opens browser, starts a local callback server on :9999."""
+    cfg = {}
+    if os.path.exists(TOKEN_FILE):
+        cfg = load_config()
+
+    client_id     = cfg.get("client_id")     or input("Azure App client_id: ").strip()
+    client_secret = cfg.get("client_secret") or input("Azure App client_secret: ").strip()
+
+    state  = secrets.token_urlsafe(16)
+    params = urllib.parse.urlencode({
+        "client_id":     client_id,
+        "response_type": "code",
+        "redirect_uri":  REDIRECT,
+        "scope":         SCOPES,
+        "state":         state,
+        "response_mode": "query",
+    })
+    auth_link   = f"{AUTH_URL}?{params}"
+    code_holder = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            qs     = urllib.parse.parse_qs(parsed.query)
+            code_holder["code"]  = qs.get("code",  [None])[0]
+            code_holder["state"] = qs.get("state", [None])[0]
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Auth complete. You can close this tab.")
+
+    server = http.server.HTTPServer(("127.0.0.1", 9999), Handler)
+    t = threading.Thread(target=server.handle_request)
+    t.start()
+
+    print(f"\nOpening browser for Microsoft login...\n{auth_link}\n")
+    webbrowser.open(auth_link)
+    t.join(timeout=120)
+    server.server_close()
+
+    code = code_holder.get("code")
+    if not code:
+        print("No code received. Did you complete the login?", file=sys.stderr)
+        sys.exit(1)
+
+    data = urllib.parse.urlencode({
+        "client_id":     client_id,
+        "client_secret": client_secret,
+        "code":          code,
+        "redirect_uri":  REDIRECT,
+        "grant_type":    "authorization_code",
+        "scope":         SCOPES,
+    }).encode()
+    req  = urllib.request.Request(TOKEN_URL, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    resp = json.loads(urllib.request.urlopen(req).read())
+
+    cfg.update({
+        "client_id":     client_id,
+        "client_secret": client_secret,
+        "access_token":  resp["access_token"],
+        "refresh_token": resp.get("refresh_token", ""),
+    })
+    save_config(cfg)
+    print("Authenticated. Tokens saved to", TOKEN_FILE)
+
+# ── Email ─────────────────────────────────────────────────────────────────────
+
+def cmd_email_list(args):
+    folder = args[0] if args else "inbox"
+    result = graph("GET", f"/me/mailFolders/{folder}/messages?$top=20&$select=id,subject,from,receivedDateTime,isRead&$orderby=receivedDateTime+desc")
+    for m in result.get("value", []):
+        read   = " " if m.get("isRead") else "●"
+        sender = m.get("from", {}).get("emailAddress", {}).get("address", "?")
+        print(f"{read} [{m['id'][:12]}] {m.get('receivedDateTime','')[:10]}  {sender:<35}  {m.get('subject','(no subject)')}")
+
+def cmd_email_read(args):
+    if not args:
+        print("Usage: msgraph email read <message-id>", file=sys.stderr); sys.exit(1)
+    msg = graph("GET", f"/me/messages/{args[0]}")
+    print(f"From:    {msg.get('from',{}).get('emailAddress',{}).get('address','')}")
+    print(f"To:      {', '.join(r.get('emailAddress',{}).get('address','') for r in msg.get('toRecipients',[]))}")
+    print(f"Subject: {msg.get('subject','')}")
+    print(f"Date:    {msg.get('receivedDateTime','')}")
+    print(f"\n{msg.get('body',{}).get('content','')[:3000]}")
+
+def cmd_email_send(args):
+    import argparse
+    p = argparse.ArgumentParser(prog="msgraph email send")
+    p.add_argument("--to",      required=True)
+    p.add_argument("--subject", required=True)
+    p.add_argument("--body",    required=True)
+    p.add_argument("--cc",      default="")
+    opts = p.parse_args(args)
+    msg  = {
+        "message": {
+            "subject": opts.subject,
+            "body":    {"contentType": "Text", "content": opts.body},
+            "toRecipients": [{"emailAddress": {"address": a.strip()}} for a in opts.to.split(",")],
+        },
+        "saveToSentItems": True,
+    }
+    if opts.cc:
+        msg["message"]["ccRecipients"] = [{"emailAddress": {"address": a.strip()}} for a in opts.cc.split(",")]
+    graph("POST", "/me/sendMail", msg)
+    print(f"Email sent to {opts.to}")
+
+def cmd_email_draft(args):
+    import argparse
+    p = argparse.ArgumentParser(prog="msgraph email draft")
+    p.add_argument("--to",      required=True)
+    p.add_argument("--subject", required=True)
+    p.add_argument("--body",    required=True)
+    opts  = p.parse_args(args)
+    draft = {
+        "subject": opts.subject,
+        "body":    {"contentType": "Text", "content": opts.body},
+        "toRecipients": [{"emailAddress": {"address": a.strip()}} for a in opts.to.split(",")],
+    }
+    result = graph("POST", "/me/messages", draft)
+    print(f"Draft created: {result.get('id')}")
+
+# ── Calendar ──────────────────────────────────────────────────────────────────
+
+def cmd_calendar_list(args):
+    days    = int(args[0]) if args else 7
+    now     = datetime.datetime.utcnow()
+    end     = now + datetime.timedelta(days=days)
+    start_s = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_s   = end.strftime("%Y-%m-%dT%H:%M:%SZ")
+    result  = graph("GET", f"/me/calendarView?startDateTime={start_s}&endDateTime={end_s}&$orderby=start/dateTime&$top=50")
+    for e in result.get("value", []):
+        start = e.get("start", {}).get("dateTime", "")[:16].replace("T", " ")
+        print(f"[{e['id'][:12]}] {start}  {e.get('subject','(no subject)')}")
+
+def cmd_calendar_create(args):
+    import argparse
+    p = argparse.ArgumentParser(prog="msgraph calendar create")
+    p.add_argument("--subject",   required=True)
+    p.add_argument("--start",     required=True)
+    p.add_argument("--end",       required=True)
+    p.add_argument("--body",      default="")
+    p.add_argument("--timezone",  default="UTC")
+    opts  = p.parse_args(args)
+    event = {
+        "subject": opts.subject,
+        "body":    {"contentType": "Text", "content": opts.body},
+        "start":   {"dateTime": opts.start, "timeZone": opts.timezone},
+        "end":     {"dateTime": opts.end,   "timeZone": opts.timezone},
+    }
+    result = graph("POST", "/me/events", event)
+    print(f"Event created: {result.get('id')}")
+
+def cmd_calendar_delete(args):
+    if not args:
+        print("Usage: msgraph calendar delete <event-id>", file=sys.stderr); sys.exit(1)
+    graph("DELETE", f"/me/events/{args[0]}")
+    print("Event deleted")
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+
+COMMANDS = {
+    ("auth",):               lambda a: cmd_auth(a),
+    ("email",    "list"):    cmd_email_list,
+    ("email",    "read"):    cmd_email_read,
+    ("email",    "send"):    cmd_email_send,
+    ("email",    "draft"):   cmd_email_draft,
+    ("calendar", "list"):    cmd_calendar_list,
+    ("calendar", "create"):  cmd_calendar_create,
+    ("calendar", "delete"):  cmd_calendar_delete,
+}
+
+if __name__ == "__main__":
+    argv = sys.argv[1:]
+    if not argv:
+        print("Usage: msgraph <auth|email|calendar> <subcommand> [options]")
+        sys.exit(1)
+    key = ("auth",) if argv[0] == "auth" else tuple(argv[:2])
+    fn  = COMMANDS.get(key)
+    if not fn:
+        print(f"Unknown command: {' '.join(argv[:2])}", file=sys.stderr)
+        sys.exit(1)
+    fn(argv[1:] if argv[0] == "auth" else argv[2:])
