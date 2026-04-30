@@ -14,17 +14,23 @@ help:
 	@echo "  openclaw-email-inbox — Email integration for OpenClaw"
 	@echo ""
 	@echo "  Quick start:"
-	@echo "    make install       Install emctl to ~/.local/bin"
-	@echo "    make add-account   Add an email account interactively"
-	@echo "    make workspace     Copy agent docs to OpenClaw workspace"
+	@echo "    make install              Install both scripts to ~/.local/bin"
+	@echo "    make workspace            Copy agent docs to OpenClaw workspace"
+	@echo ""
+	@echo "  Account setup:"
+	@echo "    make setup-microsoft      Authenticate Microsoft via OAuth2 (Graph API)"
+	@echo "    make add-account          Add Gmail, GMX, or any IMAP account"
 	@echo ""
 	@echo "  All-in-one:"
-	@echo "    make all           install + workspace (then run make add-account)"
+	@echo "    make all                  install + workspace"
 	@echo ""
 	@echo "  Other:"
-	@echo "    make check         Verify emctl is installed and accounts are configured"
-	@echo "    make accounts      List configured accounts"
-	@echo "    make uninstall     Remove emctl from PATH"
+	@echo "    make check                Verify installation and accounts"
+	@echo "    make accounts             List configured IMAP accounts"
+	@echo "    make uninstall            Remove installed scripts"
+	@echo ""
+	@echo "  Note: Microsoft (Outlook/Live) requires OAuth2 — use msgraph."
+	@echo "        Gmail, GMX, Yahoo, etc. use IMAP — use emctl."
 	@echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -33,10 +39,11 @@ help:
 
 .PHONY: install
 install:
-	@echo "→ Installing emctl to $(INSTALL_DIR)"
+	@echo "→ Installing scripts to $(INSTALL_DIR)"
 	@mkdir -p $(INSTALL_DIR) $(CONFIG_DIR)
-	@install -m 755 scripts/emctl $(INSTALL_DIR)/emctl
-	@echo "✓ emctl installed."
+	@install -m 755 scripts/emctl   $(INSTALL_DIR)/emctl
+	@install -m 755 scripts/msgraph $(INSTALL_DIR)/msgraph
+	@echo "✓ emctl and msgraph installed."
 	@echo ""
 	@echo "  Make sure $(INSTALL_DIR) is in your PATH:"
 	@echo "    export PATH=\"\$$HOME/.local/bin:\$$PATH\""
@@ -44,32 +51,46 @@ install:
 
 .PHONY: uninstall
 uninstall:
-	@echo "→ Removing emctl from $(INSTALL_DIR)"
-	@rm -f $(INSTALL_DIR)/emctl
+	@echo "→ Removing scripts from $(INSTALL_DIR)"
+	@rm -f $(INSTALL_DIR)/emctl $(INSTALL_DIR)/msgraph
 	@echo "✓ Done."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Account setup
 # ─────────────────────────────────────────────────────────────────────────────
 
+.PHONY: setup-microsoft
+setup-microsoft:
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  Microsoft (Outlook / Live / Hotmail) — OAuth2 Setup"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo ""
+	@echo "  Microsoft blocks basic auth (including App Passwords) for IMAP."
+	@echo "  msgraph uses the Microsoft Graph API with OAuth2 instead."
+	@echo ""
+	@echo "  You will need an Azure App registration."
+	@echo "  See setup/microsoft-oauth.md for step-by-step instructions."
+	@echo ""
+	@msgraph auth
+
 .PHONY: add-account
 add-account:
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  Add Email Account"
+	@echo "  Add IMAP Email Account (Gmail, GMX, Yahoo, iCloud, Fastmail…)"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo ""
-	@echo "  You will need an App Password for your account."
-	@echo "  (App Passwords work even if your normal password doesn't)"
+	@echo "  NOTE: Microsoft (Outlook/Live) is NOT supported here."
+	@echo "        Use 'make setup-microsoft' for Microsoft accounts."
 	@echo ""
-	@echo "  Microsoft: https://account.live.com/proofs/manage/additional"
-	@echo "             Settings → Security → App passwords"
+	@echo "  You will need an App Password for Gmail/Yahoo/iCloud."
+	@echo "  GMX and Fastmail accept your regular password."
 	@echo ""
-	@echo "  Gmail:     https://myaccount.google.com/apppasswords"
-	@echo "             (Requires 2-Step Verification to be enabled)"
-	@echo ""
-	@echo "  GMX:       Use your regular GMX password"
-	@echo "             (enable IMAP at mail.gmx.net → Settings → POP3/IMAP)"
+	@echo "  Gmail:    https://myaccount.google.com/apppasswords"
+	@echo "  GMX:      your regular password (enable IMAP in GMX settings)"
+	@echo "  Yahoo:    https://login.yahoo.com/account/security"
+	@echo "  iCloud:   https://appleid.apple.com → App-Specific Passwords"
 	@echo ""
 	@emctl add-account
 
@@ -95,10 +116,15 @@ workspace:
 
 .PHONY: check
 check:
-	@echo "Checking emctl..."
-	@which emctl && echo "  ✓ emctl found in PATH" || echo "  ✗ emctl not found — run: make install"
+	@echo "Checking scripts..."
+	@which msgraph  && echo "  ✓ msgraph  (Microsoft Graph API)" || echo "  ✗ msgraph  not found — run: make install"
+	@which emctl    && echo "  ✓ emctl    (IMAP/SMTP)"           || echo "  ✗ emctl    not found — run: make install"
 	@echo ""
-	@emctl list-accounts 2>/dev/null || echo "  No accounts configured — run: make add-account"
+	@echo "Checking Microsoft config..."
+	@test -f $(CONFIG_DIR)/microsoft.json && echo "  ✓ Microsoft OAuth2 tokens present" || echo "  - Microsoft not authenticated (run: make setup-microsoft)"
+	@echo ""
+	@echo "Checking IMAP accounts..."
+	@emctl list-accounts 2>/dev/null || echo "  No IMAP accounts configured — run: make add-account"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # All
@@ -111,9 +137,10 @@ all: install workspace
 	@echo "  Installation complete!"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo ""
-	@echo "  Next — add your email accounts:"
+	@echo "  Next — connect your email accounts:"
 	@echo ""
-	@echo "    make add-account   (run once per email account)"
+	@echo "    make setup-microsoft   Microsoft (Outlook/Live/Hotmail)"
+	@echo "    make add-account       Gmail, GMX, Yahoo, or any IMAP provider"
 	@echo ""
 	@echo "  Then restart your OpenClaw agent to pick up the new TOOLS.md."
 	@echo ""

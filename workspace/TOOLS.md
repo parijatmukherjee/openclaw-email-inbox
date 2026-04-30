@@ -1,7 +1,11 @@
 # Email Tools for OpenClaw Agents
 
-You have one unified email CLI: `emctl`. It works with any IMAP/SMTP provider
-(Microsoft Outlook/Live, Gmail, GMX, Yahoo, etc.) using App Passwords.
+Two CLIs are available:
+
+| Tool      | Provider                         | Auth method       |
+|-----------|----------------------------------|-------------------|
+| `msgraph` | Microsoft (Outlook/Live/Hotmail) | OAuth2 (Graph API) — Microsoft blocks IMAP basic auth |
+| `emctl`   | Gmail, GMX, Yahoo, iCloud, etc.  | IMAP/SMTP with App Passwords |
 
 ---
 
@@ -10,113 +14,122 @@ You have one unified email CLI: `emctl`. It works with any IMAP/SMTP provider
 **Never send an email directly. Always:**
 1. Build the draft and show it to the user (To, Subject, Body, Attachments)
 2. Wait for explicit approval: "yes", "send it", "approved", or similar
-3. Only then send with `emctl email send`
+3. Only then run the send command
 4. If the user edits anything, show the updated draft and ask again
 
 This applies even when the user says "send an email to..." — draft first, always.
 
 ---
 
-## Commands
+## msgraph — Microsoft Email + Calendar
 
 ```bash
-# Account management
-emctl list-accounts                        # show all configured accounts
-emctl add-account                          # add a new account interactively
-emctl set-default <name>                   # change default account
+msgraph email list                           # inbox (last 20), ● = unread
+msgraph email list sent                      # sent items
+msgraph email read <id>                      # read message + list attachments
+msgraph email draft \
+  --to "addr" --subject "..." --body "..." \
+  [--attach /path/to/file] \
+  [--attach-url "https://..."]
+msgraph email send \
+  --to "addr" --subject "..." --body "..." \
+  [--attach /path/to/file] \
+  [--attach-url "https://..."]
+msgraph email attachment <msg-id> <att-id> [--out filename]   # download attachment
 
-# Email — uses default account
-emctl email list                           # inbox (last 20), ● = unread
-emctl email list sent                      # sent items
-emctl email list drafts                    # drafts folder
-emctl email read <uid>                     # read message + list attachments
-emctl email attachment <uid> <index> [--out filename]  # download attachment
-emctl email draft --to ADDR --subject "..." --body "..." [--attach FILE] [--attach-url URL]
-emctl email send  --to ADDR --subject "..." --body "..." [--attach FILE] [--attach-url URL]
-
-# Email — specific account
-emctl -a gmail    email list
-emctl -a microsoft email list
-emctl -a gmx      email list
+msgraph calendar list [days]                 # upcoming events (default: 7 days)
+msgraph calendar create \
+  --subject "..." \
+  --start "2026-05-10T14:00:00" \
+  --end   "2026-05-10T15:00:00" \
+  --timezone "Europe/Berlin"
+msgraph calendar delete <event-id>
 ```
 
-`--attach` and `--attach-url` are repeatable: `--attach a.pdf --attach b.pdf`
+Message IDs are long — the CLI shows a short ID (last ~14 chars) in brackets, e.g. `[ZAAI_92wMAAAAA]`. Pass the short ID directly to `email read` and `email attachment`.
+
+---
+
+## emctl — Gmail, GMX, and any IMAP provider
+
+```bash
+emctl list-accounts                          # show configured accounts
+emctl set-default <name>                     # change default account
+
+emctl email list                             # inbox (default account), ● = unread
+emctl email list sent
+emctl email list drafts
+emctl email read <uid>                       # read message + list attachments
+emctl email attachment <uid> <index> [--out filename]   # download by index number
+emctl email draft \
+  --to "addr" --subject "..." --body "..." \
+  [--attach /path/to/file] \
+  [--attach-url "https://..."]
+emctl email send \
+  --to "addr" --subject "..." --body "..." \
+  [--attach /path/to/file] \
+  [--attach-url "https://..."]
+
+# Specific account
+emctl -a gmail email list
+emctl -a gmx   email list
+```
+
+`--attach` and `--attach-url` are repeatable.
 
 ---
 
 ## Handling File Attachments from Discord (or any channel)
 
-When the user shares a file with you in Discord, it arrives as a Discord CDN URL.
-**You must download it locally first — do not pass the URL to --attach.**
+When the user shares a file in Discord, it arrives as a CDN URL. **Download it locally first.**
 
-### Step-by-step
-
-**1. Download to /tmp/**
+**Step 1 — Download to /tmp/**
 ```bash
 curl -L -o /tmp/<filename> "<discord_cdn_url>"
 ```
 
-**2. Draft with the local path**
+**Step 2 — Draft with local path**
 ```bash
-emctl email draft \
-  --to "recipient@example.com" \
-  --subject "..." \
-  --body "..." \
-  --attach /tmp/<filename>
+# Microsoft
+msgraph email draft --to "..." --subject "..." --body "..." --attach /tmp/<filename>
+# Gmail/GMX
+emctl email draft --to "..." --subject "..." --body "..." --attach /tmp/<filename>
 ```
 
-**3. Show the draft to the user**
+**Step 3 — Show draft to user and wait for approval**
 > Draft ready:
-> To: recipient@example.com
+> To: ...
 > Subject: ...
 > Attachment: filename.pdf
 >
 > Send it?
 
-**4. After approval, send**
+**Step 4 — After approval, send**
 ```bash
-emctl email send \
-  --to "recipient@example.com" \
-  --subject "..." \
-  --body "..." \
-  --attach /tmp/<filename>
+msgraph email send --to "..." --subject "..." --body "..." --attach /tmp/<filename>
+# or
+emctl email send --to "..." --subject "..." --body "..." --attach /tmp/<filename>
 ```
 
-**5. Clean up**
+**Step 5 — Clean up**
 ```bash
 rm /tmp/<filename>
 ```
 
-For files from any other source that gives you a real public URL (not Discord):
-```bash
-emctl email draft --to "..." --subject "..." --body "..." --attach-url "https://..."
-```
+---
+
+## Config locations
+
+| Tool      | Config file                                   |
+|-----------|-----------------------------------------------|
+| msgraph   | `~/.config/openclaw-email/microsoft.json`     |
+| emctl     | `~/.config/openclaw-email/accounts.json`      |
+
+If msgraph fails with 401, run: `msgraph auth`
+If emctl fails with "No accounts configured", run: `emctl add-account`
 
 ---
 
-## Config
+## Default timezone
 
-Accounts are stored at `~/.config/openclaw-email/accounts.json` (chmod 600).
-
-If a command fails with "No accounts configured", run:
-```bash
-emctl add-account
-```
-
----
-
-## Message UIDs
-
-The `email list` output shows a numeric UID in brackets, e.g. `[  142]`.
-Pass that number directly to `email read` and `email attachment`.
-
-UIDs are per-folder. A UID from `email list sent` won't work with `email read`
-(which searches INBOX). For non-inbox messages, note the folder context.
-
----
-
-## Notes
-
-- Default timezone for any date references: **Europe/Berlin**
-- Microsoft calendar is not available via IMAP — email only
-- If login fails, the user likely needs to generate/regenerate their App Password
+Always use **Europe/Berlin** for calendar events and any date/time references unless the user specifies otherwise.
