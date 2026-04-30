@@ -220,14 +220,54 @@ def cmd_attachment_download(args):
         f.write(data)
     print(f"Saved: {name}  ({len(data)//1024} KB)")
 
+def build_attachments(paths, urls):
+    """Load files from local paths and/or remote URLs into Graph attachment dicts."""
+    import base64, mimetypes
+    attachments = []
+    for path in paths:
+        with open(path, "rb") as f:
+            data = f.read()
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        attachments.append({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name":         os.path.basename(path),
+            "contentType":  mime,
+            "contentBytes": base64.b64encode(data).decode(),
+        })
+    for url in urls:
+        print(f"  Downloading {url} ...", file=sys.stderr)
+        req  = urllib.request.Request(url, headers={"User-Agent": "openclaw-email/1.0"})
+        resp = urllib.request.urlopen(req)
+        data = resp.read()
+        # Derive filename from URL or Content-Disposition
+        cd   = resp.headers.get("Content-Disposition", "")
+        name = ""
+        if "filename=" in cd:
+            name = cd.split("filename=")[-1].strip().strip('"')
+        if not name:
+            name = urllib.parse.urlparse(url).path.split("/")[-1] or "attachment"
+        mime = resp.headers.get("Content-Type", "application/octet-stream").split(";")[0]
+        attachments.append({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name":         name,
+            "contentType":  mime,
+            "contentBytes": base64.b64encode(data).decode(),
+        })
+        print(f"  Downloaded: {name} ({len(data)//1024} KB)", file=sys.stderr)
+    return attachments
+
 def cmd_email_send(args):
-    import argparse, base64, mimetypes
+    import argparse
     p = argparse.ArgumentParser(prog="msgraph email send")
-    p.add_argument("--to",         required=True)
-    p.add_argument("--subject",    required=True)
-    p.add_argument("--body",       required=True)
-    p.add_argument("--cc",         default="")
-    p.add_argument("--attach",     action="append", default=[], metavar="FILE")
+    p.add_argument("--to",          required=True)
+    p.add_argument("--subject",     required=True)
+    p.add_argument("--body",        required=True)
+    p.add_argument("--cc",          default="")
+    p.add_argument("--attach",      action="append", default=[], metavar="FILE",
+                   help="Local file path to attach (repeatable)")
+    p.add_argument("--attach-url",  action="append", default=[], metavar="URL",
+                   dest="attach_url",
+                   help="URL to download and attach (Discord CDN, etc.) (repeatable)")
     opts = p.parse_args(args)
     msg  = {
         "message": {
@@ -239,48 +279,32 @@ def cmd_email_send(args):
     }
     if opts.cc:
         msg["message"]["ccRecipients"] = [{"emailAddress": {"address": a.strip()}} for a in opts.cc.split(",")]
-    if opts.attach:
-        attachments = []
-        for path in opts.attach:
-            with open(path, "rb") as f:
-                data = f.read()
-            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-            attachments.append({
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                "name":         os.path.basename(path),
-                "contentType":  mime,
-                "contentBytes": base64.b64encode(data).decode(),
-            })
-        msg["message"]["attachments"] = attachments
+    atts = build_attachments(opts.attach, opts.attach_url)
+    if atts:
+        msg["message"]["attachments"] = atts
     graph("POST", "/me/sendMail", msg)
     print(f"Email sent to {opts.to}")
 
 def cmd_email_draft(args):
-    import argparse, base64, mimetypes
+    import argparse
     p = argparse.ArgumentParser(prog="msgraph email draft")
-    p.add_argument("--to",      required=True)
-    p.add_argument("--subject", required=True)
-    p.add_argument("--body",    required=True)
-    p.add_argument("--attach",  action="append", default=[], metavar="FILE")
+    p.add_argument("--to",          required=True)
+    p.add_argument("--subject",     required=True)
+    p.add_argument("--body",        required=True)
+    p.add_argument("--attach",      action="append", default=[], metavar="FILE",
+                   help="Local file path to attach (repeatable)")
+    p.add_argument("--attach-url",  action="append", default=[], metavar="URL",
+                   dest="attach_url",
+                   help="URL to download and attach (Discord CDN, etc.) (repeatable)")
     opts  = p.parse_args(args)
     draft = {
         "subject": opts.subject,
         "body":    {"contentType": "Text", "content": opts.body},
         "toRecipients": [{"emailAddress": {"address": a.strip()}} for a in opts.to.split(",")],
     }
-    if opts.attach:
-        attachments = []
-        for path in opts.attach:
-            with open(path, "rb") as f:
-                data = f.read()
-            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-            attachments.append({
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                "name":         os.path.basename(path),
-                "contentType":  mime,
-                "contentBytes": base64.b64encode(data).decode(),
-            })
-        draft["attachments"] = attachments
+    atts = build_attachments(opts.attach, opts.attach_url)
+    if atts:
+        draft["attachments"] = atts
     result = graph("POST", "/me/messages", draft)
     print(f"Draft created: [{short_id(result.get('id',''))}]  full-id: {result.get('id')}")
 
