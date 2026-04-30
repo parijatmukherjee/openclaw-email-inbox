@@ -1,20 +1,11 @@
 # openclaw-email-inbox
 
-Email and calendar integration for [OpenClaw](https://openclaw.dev) agents.
+Unified email integration for [OpenClaw](https://openclaw.dev) agents via IMAP/SMTP.
 
-Connect your AI agent to **Microsoft (Outlook/Live/Hotmail)**, **Gmail**, and **GMX** (or any IMAP provider) — with a built-in draft-approval gate so the agent always asks before sending.
+One script — `emctl` — connects any email provider using App Passwords.
+No OAuth flows, no cloud project setup, no token management.
 
----
-
-## What's Included
-
-| Script      | Provider                          | Protocol         |
-|-------------|-----------------------------------|------------------|
-| `msgraph`   | Microsoft (Outlook/Live/Hotmail)  | Microsoft Graph API (OAuth2) |
-| `gmailctl`  | Gmail                             | Gmail API (OAuth2) |
-| `gmxctl`    | GMX, Yahoo, iCloud, Fastmail, etc | IMAP / SMTP      |
-
-All scripts follow the same interface: `list`, `read`, `draft`, `send`.
+Supports: **Microsoft (Outlook/Live/Hotmail)**, **Gmail**, **GMX**, **Yahoo**, **iCloud**, **Fastmail**, and any IMAP/SMTP provider.
 
 ---
 
@@ -33,32 +24,27 @@ cd openclaw-email-inbox
 make install
 ```
 
-This copies the scripts to `~/.local/bin`. Make sure it's in your `PATH`:
-
+Make sure `~/.local/bin` is in your PATH:
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-# Add to ~/.bashrc or ~/.zshrc to make permanent
+# Add to ~/.bashrc or ~/.zshrc to make it permanent
 ```
 
-### 3. Connect your accounts
-
-Run only the providers you need:
+### 3. Add your email accounts
 
 ```bash
-make setup-microsoft   # Outlook / Live / Hotmail
-make setup-gmail       # Gmail
-make setup-gmx         # GMX or any IMAP provider
+make add-account
 ```
 
-Each command walks you through the setup interactively.
+Run this once per email account. You'll need an **App Password** — see [setup/app-passwords.md](setup/app-passwords.md) for instructions for each provider.
 
-### 4. Add to OpenClaw workspace
+### 4. Set up the OpenClaw agent
 
 ```bash
 make workspace
 ```
 
-This copies `workspace/TOOLS.md` into your OpenClaw workspace (`~/.openclaw/workspace/TOOLS.md`) so your agent knows what commands are available.
+Copies `workspace/TOOLS.md` into your OpenClaw workspace so your agent knows the available commands.
 
 ### 5. Check everything
 
@@ -68,105 +54,132 @@ make check
 
 ---
 
-## Usage Examples
-
-### Read email
+## Usage
 
 ```bash
-msgraph email list            # Microsoft inbox
-gmailctl email list           # Gmail inbox
-gmxctl email list             # GMX inbox
+# List all configured accounts
+emctl list-accounts
 
-msgraph email read AAMkAGI... # read a specific message
-```
+# Read inbox (default account)
+emctl email list
 
-### Draft + send (with agent approval gate)
+# Read inbox of a specific account
+emctl -a gmail    email list
+emctl -a microsoft email list
 
-```bash
-# Save as draft first
-msgraph email draft --to "friend@example.com" --subject "Hello" --body "..."
+# Read a message
+emctl email read 142
 
-# Send only after user confirms
-msgraph email send --to "friend@example.com" --subject "Hello" --body "..."
-```
+# Save a draft
+emctl email draft \
+  --to "friend@example.com" \
+  --subject "Hello" \
+  --body "How are you?"
 
-### Calendar (Microsoft)
+# Send (after drafting and reviewing)
+emctl email send \
+  --to "friend@example.com" \
+  --subject "Hello" \
+  --body "How are you?"
 
-```bash
-msgraph calendar list            # next 7 days
-msgraph calendar list 14         # next 14 days
+# Attach a local file
+emctl email send --to "..." --subject "..." --body "..." --attach /path/to/file.pdf
 
-msgraph calendar create \
-  --subject "Team meeting" \
-  --start "2026-05-10T14:00:00" \
-  --end   "2026-05-10T15:00:00" \
-  --timezone "Europe/Berlin"
+# Attach from a URL (e.g. a public download link)
+emctl email send --to "..." --subject "..." --body "..." --attach-url "https://..."
 
-msgraph calendar delete <event-id>
+# Download an attachment from a received email
+emctl email read 142          # shows attachment list with index numbers
+emctl email attachment 142 0  # downloads attachment at index 0
+emctl email attachment 142 0 --out report.pdf  # save with custom name
 ```
 
 ---
 
-## Agent Setup Guide
+## Adding More Accounts
 
-If you're configuring this for an OpenClaw agent (like Dobby), paste this into your agent's `TOOLS.md` or point it to `workspace/TOOLS.md`:
-
-```
-msgraph email list            — list Microsoft inbox
-gmailctl email list           — list Gmail inbox
-gmxctl email list             — list GMX inbox
+```bash
+make add-account
 ```
 
-The `workspace/TOOLS.md` file in this repo is ready to copy directly.
-
-**Important rule to add to your agent's `SOUL.md`:**
-
+Or directly:
+```bash
+emctl add-account
 ```
-Always draft emails first. Never send without explicit user approval.
-1. Prepare draft (To, Subject, Body) and show to user.
-2. Wait for confirmation: "yes", "send it", "approved".
-3. Send only after explicit approval.
-4. If edited, re-confirm before sending.
+
+To change the default account:
+```bash
+emctl set-default gmail
 ```
 
 ---
 
-## Detailed Setup Guides
+## Agent Setup
 
-- [Microsoft (Outlook/Live)](setup/microsoft.md)
-- [Gmail](setup/gmail.md)
-- [GMX / Generic IMAP](setup/gmx.md)
+The `workspace/TOOLS.md` file in this repo is written for OpenClaw agents. It covers:
+- All `emctl` commands
+- How to handle Discord file attachments (download to `/tmp/` first)
+- The draft-approval workflow (always draft, never send without user confirmation)
+- How to look up message UIDs
+
+After running `make workspace`, restart your OpenClaw agent to load the new instructions.
+
+---
+
+## App Passwords
+
+Each provider has a slightly different flow for generating App Passwords.
+See [setup/app-passwords.md](setup/app-passwords.md) for step-by-step instructions for:
+
+- Microsoft (Outlook / Live / Hotmail)
+- Gmail
+- GMX
+- Yahoo
+- iCloud
+- Fastmail
 
 ---
 
 ## Requirements
 
 - Python 3.8+
-- No external packages required (uses only stdlib)
+- No external packages (uses only stdlib)
 
 ---
 
-## Config Files
+## Config
 
-| Provider  | Config Path                               | Auth Method     |
-|-----------|-------------------------------------------|-----------------|
-| Microsoft | `~/.config/openclaw-email/microsoft.json` | OAuth2 tokens   |
-| Gmail     | `~/.config/openclaw-email/gmail.json`     | OAuth2 tokens   |
-| GMX/IMAP  | `~/.config/openclaw-email/gmx.json`       | Username + password |
+All accounts are stored in `~/.config/openclaw-email/accounts.json` with `chmod 600`.
 
-All files are created with `chmod 600` (owner-read-only).
-
----
-
-## Re-authenticate
-
-If tokens expire, just re-run the auth command:
-
-```bash
-msgraph auth    # Microsoft
-gmailctl auth   # Gmail
-gmxctl auth     # GMX (re-enter password)
+```json
+{
+  "default": "microsoft",
+  "accounts": {
+    "microsoft": {
+      "username": "you@live.com",
+      "password": "app-password-here",
+      "imap_host": "outlook.office365.com",
+      "imap_port": 993,
+      "smtp_host": "smtp.office365.com",
+      "smtp_port": 587
+    },
+    "gmail": {
+      "username": "you@gmail.com",
+      "password": "app-password-here",
+      "imap_host": "imap.gmail.com",
+      "imap_port": 993,
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 587
+    }
+  }
+}
 ```
+
+---
+
+## Note on Microsoft Calendar
+
+This repo handles **email only** via IMAP. Microsoft Calendar (previously available via the Graph API) is not included. If you need calendar support, it requires a separate OAuth2 integration.
 
 ---
 

@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""
+emctl — unified email CLI for OpenClaw (IMAP/SMTP)
+
+Supports any email provider: Microsoft (Outlook/Live), Gmail, GMX, Yahoo, etc.
+Uses App Passwords — no OAuth required.
+
+Config: ~/.config/openclaw-email/accounts.json
+
+Quick start:
+  emctl add-account           add a new email account interactively
+  emctl list-accounts         show all configured accounts
+  emctl email list            list inbox of default account
+  emctl -a gmail email list   list inbox of account named "gmail"
+"""
+
+import sys, os, json, imaplib, smtplib, email as emaillib, base64, re
+import mimetypes, getpass, urllib.request, urllib.parse
+from email.mime.text    import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base    import MIMEBase
+from email              import encoders
+
+CONFIG_DIR   = os.path.expanduser("~/.config/openclaw-email")
+ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
+
+PROVIDER_PRESETS = {
+    "microsoft": {"imap_host": "outlook.office365.com", "imap_port": 993, "smtp_host": "smtp.office365.com",  "smtp_port": 587},
+    "gmail":     {"imap_host": "imap.gmail.com",         "imap_port": 993, "smtp_host": "smtp.gmail.com",      "smtp_port": 587},
+    "gmx":       {"imap_host": "imap.gmx.net",           "imap_port": 993, "smtp_host": "mail.gmx.net",        "smtp_port": 587},
+    "yahoo":     {"imap_host": "imap.mail.yahoo.com",    "imap_port": 993, "smtp_host": "smtp.mail.yahoo.com", "smtp_port": 587},
+    "icloud":    {"imap_host": "imap.mail.me.com",       "imap_port": 993, "smtp_host": "smtp.mail.me.com",    "smtp_port": 587},
+    "fastmail":  {"imap_host": "imap.fastmail.com",      "imap_port": 993, "smtp_host": "smtp.fastmail.com",   "smtp_port": 587},
+    "custom":    {"imap_host": "",                        "imap_port": 993, "smtp_host": "",                    "smtp_port": 587},
+}
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+def load_accounts():
+    if not os.path.exists(ACCOUNTS_FILE):
+        return {"default": None, "accounts": {}}
+    with open(ACCOUNTS_FILE) as f:
+        return json.load(f)
+
+def save_accounts(data):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(ACCOUNTS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(ACCOUNTS_FILE, 0o600)
+
+def get_account(name=None):
+    data = load_accounts()
+    accounts = data.get("accounts", {})
+    if not accounts:
+        print("No accounts configured. Run: emctl add-account", file=sys.stderr)
+        sys.exit(1)
+    key = name or data.get("default")
+    if not key:
+        key = next(iter(accounts))
+    if key not in accounts:
+        print(f"Account '{key}' not found. Run: emctl list-accounts", file=sys.stderr)
+        sys.exit(1)
+    return accounts[key]
+
+# ── IMAP / SMTP helpers ───────────────────────────────────────────────────────
+
+def imap_connect(cfg):
+    conn = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
+    conn.login(cfg["username"], cfg["password"])
+    return conn
+
+def smtp_connect(cfg):
+    s = smtplib.SMTP(cfg["smtp_host"], cfg["smtp_port"])
+    s.ehlo()
+    s.starttls()
+    s.ehlo()
+    s.login(cfg["username"], cfg["password"])
+    return s
+
+def decode_header_value(val):
+    parts = emaillib.header.decode_header(val or "")
+    result = []
+    for part, enc in parts:
+        if isinstance(part, bytes):
+            result.append(part.decode(enc or "utf-8", errors="replace"))
+        else:
+            result.append(part)
+    return "".join(result)
+
+def get_body(msg):
+    """Extract plain text body from an email.message.Message."""
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            cd = str(part.get("Content-Disposition", ""))
+            if ct == "text/plain" and "attachment" not in cd:
+                charset = part.get_content_charset() or "utf-8"
+                body = part.get_payload(decode=True).decode(charset, errors="replace")
+                break
+        if not body:
+            for part in msg.walk():
+                ct = part.get_content_type()
+                cd = str(part.get("Content-Disposition", ""))
+                if ct == "text/html" and "attachment" not in cd:
+                    charset = part.get_content_charset() or "utf-8"
+                    html = part.get_payload(decode=True).decode(charset, errors="replace")
+                    html = re.sub(r"(?is)<style[^>]*>.*?</style>", "", html)
+                    html = re.sub(r"(?is)<script[^>]*>.*?</script>", "", html)
+                    html = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+                    html = re.sub(r"<[^>]+>", " ", html)
+                    html = emaillib.html.unescape(html) if hasattr(emaillib, "html") else html
+                    try:
+                        import html as htmlmod
+                        html = htmlmod.unescape(html)
+                    except Exception:
+                        pass
+                    html = html.replace(" ", " ")
+                    html = re.sub(r"[ \t]+", " ", html)
+                    body = re.sub(r"\n{3,}", "\n\n", html).strip()
+                    break
+    else:
+        charset = msg.get_content_charset() or "utf-8"
+        body = msg.get_payload(decode=True).decode(charset, errors="replace")
+    return body
+
+def list_attachments(msg):
+    atts = []
+    for part in msg.walk():
+        cd = str(part.get("Content-Disposition", ""))
+        if "attachment" in cd:
+            name = decode_header_value(part.get_filename() or "attachment")
+            atts.append((name, part))
+    return atts
+
+def build_mime(cfg, to, subject, body, cc="", attach_paths=None, attach_urls=None):
+    msg = MIMEMultipart()
+    msg["From"]    = cfg["username"]
+    msg["To"]      = to
+    msg["Subject"] = subject
+    if cc:
+        msg["Cc"] = cc
+    msg.attach(MIMEText(body, "plain"))
+
+    for path in (attach_paths or []):
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        main, sub = mime.split("/", 1)
+        with open(path, "rb") as f:
+            part = MIMEBase(main, sub)
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", "attachment", filename=os.path.basename(path))
+        msg.attach(part)
+
+    for url in (attach_urls or []):
+        print(f"  Downloading {url} ...", file=sys.stderr)
+        req  = urllib.request.Request(url, headers={"User-Agent": "openclaw-emctl/1.0"})
+        resp = urllib.request.urlopen(req)
+        data = resp.read()
+        cd   = resp.headers.get("Content-Disposition", "")
+        name = ""
+        if "filename=" in cd:
+            name = cd.split("filename=")[-1].strip().strip('"')
+        if not name:
+            name = urllib.parse.urlparse(url).path.split("/")[-1] or "attachment"
+        mime = resp.headers.get("Content-Type", "application/octet-stream").split(";")[0]
+        main, sub = mime.split("/", 1) if "/" in mime else ("application", "octet-stream")
+        part = MIMEBase(main, sub)
+        part.set_payload(data)
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", "attachment", filename=name)
+        msg.attach(part)
+        print(f"  Downloaded: {name} ({len(data)//1024} KB)", file=sys.stderr)
+
+    return msg
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+def cmd_add_account(args):
+    """Interactively add or update an email account."""
+    print("\n─── Add Email Account ───────────────────────────────────────")
+    print("Providers: microsoft, gmail, gmx, yahoo, icloud, fastmail, custom")
+    provider = input("Provider [microsoft]: ").strip().lower() or "microsoft"
+    preset   = PROVIDER_PRESETS.get(provider, PROVIDER_PRESETS["custom"])
+
+    name     = input(f"Account name (short label) [{provider}]: ").strip() or provider
+    username = input("Email address: ").strip()
+    password = getpass.getpass("App password (input hidden): ")
+
+    imap_host = input(f"IMAP host [{preset['imap_host']}]: ").strip() or preset["imap_host"]
+    imap_port = input(f"IMAP port [{preset['imap_port']}]: ").strip() or str(preset["imap_port"])
+    smtp_host = input(f"SMTP host [{preset['smtp_host']}]: ").strip() or preset["smtp_host"]
+    smtp_port = input(f"SMTP port [{preset['smtp_port']}]: ").strip() or str(preset["smtp_port"])
+
+    cfg = {
+        "username":  username,
+        "password":  password,
+        "imap_host": imap_host,
+        "imap_port": int(imap_port),
+        "smtp_host": smtp_host,
+        "smtp_port": int(smtp_port),
+    }
+
+    print(f"\nTesting IMAP connection to {imap_host}:{imap_port} ...", end=" ", flush=True)
+    try:
+        conn = imap_connect(cfg)
+        conn.logout()
+        print("OK")
+    except Exception as e:
+        print(f"FAILED\n\nError: {e}", file=sys.stderr)
+        print("\nCheck your app password and IMAP settings.", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_accounts()
+    data["accounts"][name] = cfg
+    if not data.get("default"):
+        data["default"] = name
+    save_accounts(data)
+
+    print(f"\n✓ Account '{name}' ({username}) saved.")
+    if data["default"] == name:
+        print(f"  Set as default account.")
+    print(f"\nTest it: emctl -a {name} email list")
+
+def cmd_list_accounts(args):
+    data     = load_accounts()
+    accounts = data.get("accounts", {})
+    if not accounts:
+        print("No accounts configured. Run: emctl add-account")
+        return
+    default = data.get("default", "")
+    print(f"\n{'NAME':<15}  {'EMAIL':<35}  {'IMAP HOST'}")
+    print("─" * 75)
+    for name, cfg in accounts.items():
+        marker = " (default)" if name == default else ""
+        print(f"{name:<15}  {cfg['username']:<35}  {cfg['imap_host']}{marker}")
+    print()
+
+def cmd_set_default(args):
+    if not args:
+        print("Usage: emctl set-default <account-name>", file=sys.stderr); sys.exit(1)
+    data = load_accounts()
+    if args[0] not in data.get("accounts", {}):
+        print(f"Account '{args[0]}' not found.", file=sys.stderr); sys.exit(1)
+    data["default"] = args[0]
+    save_accounts(data)
+    print(f"Default account set to '{args[0]}'")
+
+def cmd_email_list(cfg, args):
+    folder_map = {"sent": "Sent", "drafts": "Drafts", "inbox": "INBOX"}
+    folder = folder_map.get(args[0].lower(), "INBOX") if args else "INBOX"
+
+    conn = imap_connect(cfg)
+    # Try common sent folder names
+    if folder == "Sent":
+        for name in ("Sent", "Sent Items", "INBOX.Sent", "[Gmail]/Sent Mail"):
+            try:
+                rv, _ = conn.select(f'"{name}"', readonly=True)
+                if rv == "OK":
+                    folder = name
+                    break
+            except Exception:
+                pass
+    else:
+        conn.select(folder, readonly=True)
+
+    _, data = conn.search(None, "ALL")
+    uids = data[0].split()
+    if not uids:
+        print("No messages.")
+        conn.logout()
+        return
+
+    for uid in reversed(uids[-20:]):
+        _, msg_data = conn.fetch(uid, "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+        raw  = msg_data[0][1]
+        msg  = emaillib.message_from_bytes(raw)
+        flags = msg_data[0][0].decode() if msg_data[0][0] else ""
+        read  = " " if "\\Seen" in flags else "●"
+        sender = decode_header_value(msg.get("From", "?"))[:35]
+        subject = decode_header_value(msg.get("Subject", "(no subject)"))
+        date = msg.get("Date", "")[:16]
+        print(f"{read} [{uid.decode():>6}] {date:<16}  {sender:<35}  {subject}")
+
+    conn.logout()
+
+def cmd_email_read(cfg, args):
+    if not args:
+        print("Usage: emctl email read <uid>", file=sys.stderr); sys.exit(1)
+    uid  = args[0].encode()
+    conn = imap_connect(cfg)
+    conn.select("INBOX", readonly=True)
+    _, data = conn.fetch(uid, "(RFC822)")
+    if not data or data[0] is None:
+        # Try other folders
+        for folder in ("Sent", "Sent Items", "Drafts", "[Gmail]/Sent Mail", "[Gmail]/Drafts"):
+            try:
+                conn.select(f'"{folder}"', readonly=True)
+                _, data = conn.fetch(uid, "(RFC822)")
+                if data and data[0]:
+                    break
+            except Exception:
+                pass
+    if not data or data[0] is None:
+        print(f"Message {args[0]} not found.", file=sys.stderr); sys.exit(1)
+
+    msg = emaillib.message_from_bytes(data[0][1])
+    print(f"From:    {decode_header_value(msg.get('From', ''))}")
+    print(f"To:      {decode_header_value(msg.get('To', ''))}")
+    print(f"Subject: {decode_header_value(msg.get('Subject', ''))}")
+    print(f"Date:    {msg.get('Date', '')}")
+
+    atts = list_attachments(msg)
+    if atts:
+        print(f"\nAttachments ({len(atts)}):")
+        for i, (name, _) in enumerate(atts):
+            print(f"  [{i}] {name}")
+
+    print(f"\n{get_body(msg)[:4000]}")
+    conn.logout()
+
+def cmd_email_attachment(cfg, args):
+    """Download attachment: emctl email attachment <uid> <index> [--out filename]"""
+    import argparse
+    p = argparse.ArgumentParser(prog="emctl email attachment")
+    p.add_argument("uid")
+    p.add_argument("index", type=int, help="Attachment index from email read output")
+    p.add_argument("--out", default="")
+    opts = p.parse_args(args)
+
+    conn = imap_connect(cfg)
+    conn.select("INBOX", readonly=True)
+    _, data = conn.fetch(opts.uid.encode(), "(RFC822)")
+    conn.logout()
+
+    msg  = emaillib.message_from_bytes(data[0][1])
+    atts = list_attachments(msg)
+    if opts.index >= len(atts):
+        print(f"No attachment at index {opts.index}. Message has {len(atts)} attachment(s).", file=sys.stderr)
+        sys.exit(1)
+
+    name, part = atts[opts.index]
+    out  = opts.out or name
+    data = part.get_payload(decode=True)
+    with open(out, "wb") as f:
+        f.write(data)
+    print(f"Saved: {out}  ({len(data)//1024} KB)")
+
+def cmd_email_send(cfg, args):
+    import argparse
+    p = argparse.ArgumentParser(prog="emctl email send")
+    p.add_argument("--to",         required=True)
+    p.add_argument("--subject",    required=True)
+    p.add_argument("--body",       required=True)
+    p.add_argument("--cc",         default="")
+    p.add_argument("--attach",     action="append", default=[], metavar="FILE")
+    p.add_argument("--attach-url", action="append", default=[], metavar="URL", dest="attach_url")
+    opts = p.parse_args(args)
+
+    msg        = build_mime(cfg, opts.to, opts.subject, opts.body, opts.cc, opts.attach, opts.attach_url)
+    recipients = [a.strip() for a in opts.to.split(",")]
+    if opts.cc:
+        recipients += [a.strip() for a in opts.cc.split(",")]
+
+    with smtp_connect(cfg) as s:
+        s.sendmail(cfg["username"], recipients, msg.as_string())
+    print(f"Sent to {opts.to}")
+
+def cmd_email_draft(cfg, args):
+    import argparse
+    p = argparse.ArgumentParser(prog="emctl email draft")
+    p.add_argument("--to",         required=True)
+    p.add_argument("--subject",    required=True)
+    p.add_argument("--body",       required=True)
+    p.add_argument("--attach",     action="append", default=[], metavar="FILE")
+    p.add_argument("--attach-url", action="append", default=[], metavar="URL", dest="attach_url")
+    opts = p.parse_args(args)
+
+    msg  = build_mime(cfg, opts.to, opts.subject, opts.body, "", opts.attach, opts.attach_url)
+    conn = imap_connect(cfg)
+
+    # Find Drafts folder
+    drafts_folder = "Drafts"
+    for name in ("Drafts", "[Gmail]/Drafts", "INBOX.Drafts", "Draft"):
+        rv, lst = conn.list('""', f'"{name}"')
+        if rv == "OK" and lst[0]:
+            drafts_folder = name
+            break
+
+    conn.append(f'"{drafts_folder}"', "\\Draft", imaplib.Time2Internaldate(None), msg.as_bytes())
+    conn.logout()
+    print(f"Draft saved to {drafts_folder}")
+    print(f"\n  To:      {opts.to}")
+    print(f"  Subject: {opts.subject}")
+    print(f"  Body:    {opts.body[:100]}{'...' if len(opts.body) > 100 else ''}")
+    if opts.attach or opts.attach_url:
+        total = len(opts.attach) + len(opts.attach_url)
+        print(f"  Attachments: {total} file(s)")
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+
+def main():
+    argv = sys.argv[1:]
+
+    # Global flags
+    account_name = None
+    if "-a" in argv:
+        i = argv.index("-a")
+        account_name = argv[i + 1]
+        argv = argv[:i] + argv[i+2:]
+    elif "--account" in argv:
+        i = argv.index("--account")
+        account_name = argv[i + 1]
+        argv = argv[:i] + argv[i+2:]
+
+    if not argv:
+        print(__doc__)
+        sys.exit(0)
+
+    cmd = argv[0]
+    rest = argv[1:]
+
+    # Account-independent commands
+    if cmd == "add-account":
+        cmd_add_account(rest); return
+    if cmd == "list-accounts":
+        cmd_list_accounts(rest); return
+    if cmd == "set-default":
+        cmd_set_default(rest); return
+
+    # Commands that need an account
+    cfg = get_account(account_name)
+
+    if cmd == "email":
+        if not rest:
+            print("Usage: emctl email <list|read|send|draft|attachment>", file=sys.stderr); sys.exit(1)
+        sub = rest[0]
+        sub_args = rest[1:]
+        if sub == "list":        cmd_email_list(cfg, sub_args)
+        elif sub == "read":      cmd_email_read(cfg, sub_args)
+        elif sub == "send":      cmd_email_send(cfg, sub_args)
+        elif sub == "draft":     cmd_email_draft(cfg, sub_args)
+        elif sub == "attachment":cmd_email_attachment(cfg, sub_args)
+        else:
+            print(f"Unknown subcommand: {sub}", file=sys.stderr); sys.exit(1)
+    else:
+        print(f"Unknown command: {cmd}", file=sys.stderr)
+        print("Run: emctl --help")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

@@ -14,18 +14,17 @@ help:
 	@echo "  openclaw-email-inbox — Email integration for OpenClaw"
 	@echo ""
 	@echo "  Quick start:"
-	@echo "    make install              Install all scripts to ~/.local/bin"
-	@echo "    make setup-microsoft      Authenticate with Microsoft (Outlook/Live)"
-	@echo "    make setup-gmail          Authenticate with Gmail"
-	@echo "    make setup-gmx            Configure GMX / IMAP credentials"
-	@echo "    make workspace            Copy agent docs to OpenClaw workspace"
+	@echo "    make install       Install emctl to ~/.local/bin"
+	@echo "    make add-account   Add an email account interactively"
+	@echo "    make workspace     Copy agent docs to OpenClaw workspace"
 	@echo ""
 	@echo "  All-in-one:"
-	@echo "    make all                  install + workspace (then run setup-* for each account)"
+	@echo "    make all           install + workspace (then run make add-account)"
 	@echo ""
 	@echo "  Other:"
-	@echo "    make check                Verify scripts are installed and accessible"
-	@echo "    make uninstall            Remove installed scripts"
+	@echo "    make check         Verify emctl is installed and accounts are configured"
+	@echo "    make accounts      List configured accounts"
+	@echo "    make uninstall     Remove emctl from PATH"
 	@echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,13 +33,10 @@ help:
 
 .PHONY: install
 install:
-	@echo "→ Installing scripts to $(INSTALL_DIR)"
-	@mkdir -p $(INSTALL_DIR)
-	@install -m 755 scripts/msgraph  $(INSTALL_DIR)/msgraph
-	@install -m 755 scripts/gmailctl $(INSTALL_DIR)/gmailctl
-	@install -m 755 scripts/gmxctl   $(INSTALL_DIR)/gmxctl
-	@mkdir -p $(CONFIG_DIR)
-	@echo "✓ Scripts installed."
+	@echo "→ Installing emctl to $(INSTALL_DIR)"
+	@mkdir -p $(INSTALL_DIR) $(CONFIG_DIR)
+	@install -m 755 scripts/emctl $(INSTALL_DIR)/emctl
+	@echo "✓ emctl installed."
 	@echo ""
 	@echo "  Make sure $(INSTALL_DIR) is in your PATH:"
 	@echo "    export PATH=\"\$$HOME/.local/bin:\$$PATH\""
@@ -48,81 +44,38 @@ install:
 
 .PHONY: uninstall
 uninstall:
-	@echo "→ Removing scripts from $(INSTALL_DIR)"
-	@rm -f $(INSTALL_DIR)/msgraph $(INSTALL_DIR)/gmailctl $(INSTALL_DIR)/gmxctl
-	@echo "✓ Scripts removed."
+	@echo "→ Removing emctl from $(INSTALL_DIR)"
+	@rm -f $(INSTALL_DIR)/emctl
+	@echo "✓ Done."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Auth / Setup
+# Account setup
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: setup-microsoft
-setup-microsoft:
+.PHONY: add-account
+add-account:
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  Microsoft (Outlook / Live / Hotmail) Setup"
+	@echo "  Add Email Account"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo ""
-	@echo "  Before you continue, make sure you have:"
-	@echo "  1. An Azure App registration at https://portal.azure.com"
-	@echo "     → App registrations → New registration"
-	@echo "     → Supported account types: Personal Microsoft accounts"
-	@echo "     → Redirect URI: http://localhost:9999/callback"
+	@echo "  You will need an App Password for your account."
+	@echo "  (App Passwords work even if your normal password doesn't)"
 	@echo ""
-	@echo "  2. API permissions added (Delegated):"
-	@echo "     Mail.ReadWrite, Mail.Send, Calendars.ReadWrite"
-	@echo "     → Click 'Grant admin consent' if available"
+	@echo "  Microsoft: https://account.live.com/proofs/manage/additional"
+	@echo "             Settings → Security → App passwords"
 	@echo ""
-	@echo "  3. A client secret created under 'Certificates & secrets'"
+	@echo "  Gmail:     https://myaccount.google.com/apppasswords"
+	@echo "             (Requires 2-Step Verification to be enabled)"
 	@echo ""
-	@echo "  See setup/microsoft.md for a detailed walkthrough."
+	@echo "  GMX:       Use your regular GMX password"
+	@echo "             (enable IMAP at mail.gmx.net → Settings → POP3/IMAP)"
 	@echo ""
-	@read -p "  Ready? Press Enter to open the browser login..." x
-	@msgraph auth
+	@emctl add-account
 
-.PHONY: setup-gmail
-setup-gmail:
-	@echo ""
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  Gmail Setup"
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo ""
-	@echo "  Before you continue, make sure you have:"
-	@echo "  1. A Google Cloud project at https://console.cloud.google.com"
-	@echo "     → Create project → Enable 'Gmail API'"
-	@echo ""
-	@echo "  2. OAuth consent screen configured:"
-	@echo "     → External → App name → Add your Gmail as a test user"
-	@echo ""
-	@echo "  3. OAuth credentials created:"
-	@echo "     → Credentials → Create → OAuth 2.0 Client ID → Desktop app"
-	@echo "     → Download client_id and client_secret"
-	@echo ""
-	@echo "  See setup/gmail.md for a detailed walkthrough."
-	@echo ""
-	@read -p "  Ready? Press Enter to open the browser login..." x
-	@gmailctl auth
-
-.PHONY: setup-gmx
-setup-gmx:
-	@echo ""
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  GMX / Generic IMAP Setup"
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo ""
-	@echo "  You will need:"
-	@echo "  - Your email address (e.g. you@gmx.de)"
-	@echo "  - Your GMX password"
-	@echo "  - IMAP/SMTP settings (defaults pre-filled for GMX)"
-	@echo ""
-	@echo "  For other providers:"
-	@echo "    Gmail IMAP:   imap.gmail.com:993 / smtp.gmail.com:587"
-	@echo "    Yahoo:        imap.mail.yahoo.com:993 / smtp.mail.yahoo.com:587"
-	@echo "    iCloud:       imap.mail.me.com:993 / smtp.mail.me.com:587"
-	@echo ""
-	@echo "  See setup/gmx.md for more details."
-	@echo ""
-	@gmxctl auth
+.PHONY: accounts
+accounts:
+	@emctl list-accounts
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Workspace
@@ -142,15 +95,10 @@ workspace:
 
 .PHONY: check
 check:
-	@echo "Checking installed scripts..."
-	@which msgraph  && echo "  ✓ msgraph"  || echo "  ✗ msgraph  not found in PATH"
-	@which gmailctl && echo "  ✓ gmailctl" || echo "  ✗ gmailctl not found in PATH"
-	@which gmxctl   && echo "  ✓ gmxctl"   || echo "  ✗ gmxctl   not found in PATH"
+	@echo "Checking emctl..."
+	@which emctl && echo "  ✓ emctl found in PATH" || echo "  ✗ emctl not found — run: make install"
 	@echo ""
-	@echo "Checking config files..."
-	@test -f $(CONFIG_DIR)/microsoft.json && echo "  ✓ Microsoft tokens present" || echo "  - Microsoft not authenticated (run: make setup-microsoft)"
-	@test -f $(CONFIG_DIR)/gmail.json     && echo "  ✓ Gmail tokens present"     || echo "  - Gmail not authenticated (run: make setup-gmail)"
-	@test -f $(CONFIG_DIR)/gmx.json       && echo "  ✓ GMX config present"       || echo "  - GMX not configured (run: make setup-gmx)"
+	@emctl list-accounts 2>/dev/null || echo "  No accounts configured — run: make add-account"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # All
@@ -163,11 +111,9 @@ all: install workspace
 	@echo "  Installation complete!"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo ""
-	@echo "  Next steps — authenticate your email accounts:"
+	@echo "  Next — add your email accounts:"
 	@echo ""
-	@echo "    make setup-microsoft   (Outlook / Live / Hotmail)"
-	@echo "    make setup-gmail       (Gmail)"
-	@echo "    make setup-gmx         (GMX or any IMAP provider)"
+	@echo "    make add-account   (run once per email account)"
 	@echo ""
 	@echo "  Then restart your OpenClaw agent to pick up the new TOOLS.md."
 	@echo ""
