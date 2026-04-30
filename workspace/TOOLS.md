@@ -14,8 +14,9 @@ msgraph auth                                    # first-time login
 msgraph email list                              # inbox (last 20)
 msgraph email list sent                         # sent items
 msgraph email read <id>                         # read a message
-msgraph email draft --to addr --subject "..." --body "..."   # save draft
-msgraph email send  --to addr --subject "..." --body "..."   # send email
+msgraph email draft --to addr --subject "..." --body "..." [--attach file]   # save draft (optional attachment)
+msgraph email send  --to addr --subject "..." --body "..." [--attach file]   # send email (optional attachment)
+msgraph email attachment <msg-id> <att-id> [--out filename]                  # download attachment
 msgraph calendar list                           # next 7 days
 msgraph calendar list 14                        # next 14 days
 msgraph calendar create --subject "..." --start "2026-05-01T10:00:00" --end "2026-05-01T11:00:00" --timezone "Europe/Berlin"
