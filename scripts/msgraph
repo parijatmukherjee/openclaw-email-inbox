@@ -152,31 +152,82 @@ def cmd_auth(args):
 
 # ── Email ─────────────────────────────────────────────────────────────────────
 
+def short_id(full_id):
+    """Return last 16 chars of message ID — unique across a mailbox."""
+    return full_id[-16:].rstrip("=")
+
 def cmd_email_list(args):
     folder = args[0] if args else "inbox"
     result = graph("GET", f"/me/mailFolders/{folder}/messages?$top=20&$select=id,subject,from,receivedDateTime,isRead&$orderby=receivedDateTime+desc")
     for m in result.get("value", []):
         read   = " " if m.get("isRead") else "●"
         sender = m.get("from", {}).get("emailAddress", {}).get("address", "?")
-        print(f"{read} [{m['id'][:12]}] {m.get('receivedDateTime','')[:10]}  {sender:<35}  {m.get('subject','(no subject)')}")
+        print(f"{read} [{short_id(m['id'])}] {m.get('receivedDateTime','')[:10]}  {sender:<35}  {m.get('subject','(no subject)')}")
+
+def resolve_id(msg_id):
+    """Accept short ID (last ~12 chars) or full ID. Searches inbox+sent if short."""
+    if len(msg_id) > 20:
+        return msg_id
+    for folder in ("inbox", "sentitems", "drafts"):
+        result = graph("GET", f"/me/mailFolders/{folder}/messages?$top=50&$select=id&$orderby=receivedDateTime+desc")
+        for m in result.get("value", []):
+            if m["id"].endswith(msg_id) or m["id"].endswith(msg_id + "==") or m["id"].endswith(msg_id + "="):
+                return m["id"]
+    print(f"Message not found: {msg_id}", file=sys.stderr); sys.exit(1)
 
 def cmd_email_read(args):
     if not args:
         print("Usage: msgraph email read <message-id>", file=sys.stderr); sys.exit(1)
-    msg = graph("GET", f"/me/messages/{args[0]}")
+    full_id = resolve_id(args[0])
+    msg = graph("GET", f"/me/messages/{full_id}")
     print(f"From:    {msg.get('from',{}).get('emailAddress',{}).get('address','')}")
     print(f"To:      {', '.join(r.get('emailAddress',{}).get('address','') for r in msg.get('toRecipients',[]))}")
     print(f"Subject: {msg.get('subject','')}")
     print(f"Date:    {msg.get('receivedDateTime','')}")
-    print(f"\n{msg.get('body',{}).get('content','')[:3000]}")
+    # List attachments if any
+    if msg.get("hasAttachments"):
+        att = graph("GET", f"/me/messages/{full_id}/attachments?$select=id,name,size,contentType")
+        print(f"\nAttachments:")
+        for a in att.get("value", []):
+            size_kb = a.get("size", 0) // 1024
+            print(f"  [{short_id(a['id'])}] {a['name']}  ({size_kb} KB)  {a.get('contentType','')}")
+    body = msg.get("body", {}).get("content", "")
+    if msg.get("body", {}).get("contentType", "").lower() == "html":
+        import re, html
+        body = re.sub(r"(?is)<style[^>]*>.*?</style>", "", body)
+        body = re.sub(r"(?is)<script[^>]*>.*?</script>", "", body)
+        body = re.sub(r"<br\s*/?>", "\n", body, flags=re.IGNORECASE)
+        body = re.sub(r"<[^>]+>", " ", body)
+        body = html.unescape(body)
+        body = body.replace(" ", " ")  # non-breaking space → regular space
+        body = re.sub(r"[ \t]+", " ", body)
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+    print(f"\n{body[:4000]}")
+
+def cmd_attachment_download(args):
+    """Download an attachment: msgraph email attachment <msg-id> <att-id> [--out path]"""
+    import argparse, base64
+    p = argparse.ArgumentParser(prog="msgraph email attachment")
+    p.add_argument("msg_id")
+    p.add_argument("att_id")
+    p.add_argument("--out", default="")
+    opts     = p.parse_args(args)
+    full_mid = resolve_id(opts.msg_id)
+    att      = graph("GET", f"/me/messages/{full_mid}/attachments/{resolve_id(opts.att_id)}")
+    name     = opts.out or att.get("name", "attachment")
+    data     = base64.b64decode(att.get("contentBytes", ""))
+    with open(name, "wb") as f:
+        f.write(data)
+    print(f"Saved: {name}  ({len(data)//1024} KB)")
 
 def cmd_email_send(args):
-    import argparse
+    import argparse, base64, mimetypes
     p = argparse.ArgumentParser(prog="msgraph email send")
-    p.add_argument("--to",      required=True)
-    p.add_argument("--subject", required=True)
-    p.add_argument("--body",    required=True)
-    p.add_argument("--cc",      default="")
+    p.add_argument("--to",         required=True)
+    p.add_argument("--subject",    required=True)
+    p.add_argument("--body",       required=True)
+    p.add_argument("--cc",         default="")
+    p.add_argument("--attach",     action="append", default=[], metavar="FILE")
     opts = p.parse_args(args)
     msg  = {
         "message": {
@@ -188,36 +239,63 @@ def cmd_email_send(args):
     }
     if opts.cc:
         msg["message"]["ccRecipients"] = [{"emailAddress": {"address": a.strip()}} for a in opts.cc.split(",")]
+    if opts.attach:
+        attachments = []
+        for path in opts.attach:
+            with open(path, "rb") as f:
+                data = f.read()
+            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            attachments.append({
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name":         os.path.basename(path),
+                "contentType":  mime,
+                "contentBytes": base64.b64encode(data).decode(),
+            })
+        msg["message"]["attachments"] = attachments
     graph("POST", "/me/sendMail", msg)
     print(f"Email sent to {opts.to}")
 
 def cmd_email_draft(args):
-    import argparse
+    import argparse, base64, mimetypes
     p = argparse.ArgumentParser(prog="msgraph email draft")
     p.add_argument("--to",      required=True)
     p.add_argument("--subject", required=True)
     p.add_argument("--body",    required=True)
+    p.add_argument("--attach",  action="append", default=[], metavar="FILE")
     opts  = p.parse_args(args)
     draft = {
         "subject": opts.subject,
         "body":    {"contentType": "Text", "content": opts.body},
         "toRecipients": [{"emailAddress": {"address": a.strip()}} for a in opts.to.split(",")],
     }
+    if opts.attach:
+        attachments = []
+        for path in opts.attach:
+            with open(path, "rb") as f:
+                data = f.read()
+            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            attachments.append({
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name":         os.path.basename(path),
+                "contentType":  mime,
+                "contentBytes": base64.b64encode(data).decode(),
+            })
+        draft["attachments"] = attachments
     result = graph("POST", "/me/messages", draft)
-    print(f"Draft created: {result.get('id')}")
+    print(f"Draft created: [{short_id(result.get('id',''))}]  full-id: {result.get('id')}")
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
 def cmd_calendar_list(args):
     days    = int(args[0]) if args else 7
-    now     = datetime.datetime.utcnow()
+    now     = datetime.datetime.now(datetime.timezone.utc)
     end     = now + datetime.timedelta(days=days)
     start_s = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_s   = end.strftime("%Y-%m-%dT%H:%M:%SZ")
     result  = graph("GET", f"/me/calendarView?startDateTime={start_s}&endDateTime={end_s}&$orderby=start/dateTime&$top=50")
     for e in result.get("value", []):
         start = e.get("start", {}).get("dateTime", "")[:16].replace("T", " ")
-        print(f"[{e['id'][:12]}] {start}  {e.get('subject','(no subject)')}")
+        print(f"[{short_id(e['id'])}] {start}  {e.get('subject','(no subject)')}")
 
 def cmd_calendar_create(args):
     import argparse
@@ -246,14 +324,15 @@ def cmd_calendar_delete(args):
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 COMMANDS = {
-    ("auth",):               lambda a: cmd_auth(a),
-    ("email",    "list"):    cmd_email_list,
-    ("email",    "read"):    cmd_email_read,
-    ("email",    "send"):    cmd_email_send,
-    ("email",    "draft"):   cmd_email_draft,
-    ("calendar", "list"):    cmd_calendar_list,
-    ("calendar", "create"):  cmd_calendar_create,
-    ("calendar", "delete"):  cmd_calendar_delete,
+    ("auth",):                   lambda a: cmd_auth(a),
+    ("email",    "list"):        cmd_email_list,
+    ("email",    "read"):        cmd_email_read,
+    ("email",    "send"):        cmd_email_send,
+    ("email",    "draft"):       cmd_email_draft,
+    ("email",    "attachment"):  lambda a: cmd_attachment_download(a),
+    ("calendar", "list"):        cmd_calendar_list,
+    ("calendar", "create"):      cmd_calendar_create,
+    ("calendar", "delete"):      cmd_calendar_delete,
 }
 
 if __name__ == "__main__":
