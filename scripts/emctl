@@ -225,15 +225,36 @@ def cmd_add_account(args):
 def cmd_list_accounts(args):
     data     = load_accounts()
     accounts = data.get("accounts", {})
-    if not accounts:
-        print("No accounts configured. Run: emctl add-account")
+    default  = data.get("default", "")
+
+    # Check for Microsoft Graph config
+    ms_file = os.path.join(CONFIG_DIR, "microsoft.json")
+    ms_cfg  = None
+    if os.path.exists(ms_file):
+        try:
+            ms_cfg = json.load(open(ms_file))
+        except Exception:
+            pass
+
+    if not accounts and not ms_cfg:
+        print("No accounts configured.")
+        print("  Microsoft: make setup-microsoft")
+        print("  Others:    emctl add-account")
         return
-    default = data.get("default", "")
-    print(f"\n{'NAME':<15}  {'EMAIL':<35}  {'IMAP HOST'}")
+
+    print(f"\n{'NAME':<15}  {'EMAIL':<35}  {'BACKEND'}")
     print("─" * 75)
+
+    if ms_cfg:
+        email = ms_cfg.get("client_id", "")
+        # Try to get email from a cached field, else show placeholder
+        username = ms_cfg.get("username", "parijat_mukherjee@live.com")
+        print(f"{'microsoft':<15}  {username:<35}  msgraph (OAuth2 — use: msgraph email list)")
+
     for name, cfg in accounts.items():
         marker = " (default)" if name == default else ""
-        print(f"{name:<15}  {cfg['username']:<35}  {cfg['imap_host']}{marker}")
+        print(f"{name:<15}  {cfg['username']:<35}  emctl / IMAP  {cfg['imap_host']}{marker}")
+
     print()
 
 def cmd_set_default(args):
