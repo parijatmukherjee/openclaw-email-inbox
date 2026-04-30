@@ -418,6 +418,85 @@ def cmd_email_draft(cfg, args):
         total = len(opts.attach) + len(opts.attach_url)
         print(f"  Attachments: {total} file(s)")
 
+def find_trash_folder(conn):
+    """Return the Trash folder name for this provider."""
+    for name in ("[Gmail]/Trash", "Trash", "Deleted Items", "Deleted Messages", "INBOX.Trash"):
+        rv, lst = conn.list('""', f'"{name}"')
+        if rv == "OK" and lst and lst[0]:
+            return name
+    return "Trash"
+
+def cmd_email_delete(cfg, args):
+    import argparse
+    p = argparse.ArgumentParser(prog="emctl email delete")
+    p.add_argument("uid",        nargs="?",       help="UID of message to delete")
+    p.add_argument("--all",      action="store_true", help="Delete all messages in folder")
+    p.add_argument("--folder",   default="INBOX", help="Folder to delete from (default: INBOX)")
+    p.add_argument("--permanent",action="store_true", help="Permanently delete instead of moving to Trash")
+    opts = p.parse_args(args)
+
+    if not opts.uid and not opts.all:
+        print("Usage: emctl email delete <uid>  OR  emctl email delete --all [--folder INBOX] [--permanent]",
+              file=sys.stderr); sys.exit(1)
+
+    conn  = imap_connect(cfg)
+    trash = find_trash_folder(conn)
+    conn.select(opts.folder)
+
+    if opts.uid:
+        # Single delete — no confirmation needed, but show subject first
+        _, data = conn.fetch(opts.uid.encode(), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+        msg     = emaillib.message_from_bytes(data[0][1])
+        subject = decode_header_value(msg.get("Subject", "(no subject)"))
+        sender  = decode_header_value(msg.get("From", "?"))
+        print(f"Deleting: [{opts.uid}] {sender} — {subject}")
+
+        if opts.permanent:
+            conn.store(opts.uid.encode(), "+FLAGS", "\\Deleted")
+            conn.expunge()
+            print("Permanently deleted.")
+        else:
+            conn.copy(opts.uid.encode(), trash)
+            conn.store(opts.uid.encode(), "+FLAGS", "\\Deleted")
+            conn.expunge()
+            print(f"Moved to {trash}.")
+
+    elif opts.all:
+        _, data = conn.search(None, "ALL")
+        uids = data[0].split()
+        count = len(uids)
+        if count == 0:
+            print(f"{opts.folder} is already empty.")
+            conn.logout(); return
+
+        # Show preview — first 5 subjects
+        print(f"\n  You are about to delete {count} message(s) from {opts.folder}.")
+        print(f"  Destination: {'permanent (unrecoverable)' if opts.permanent else trash}")
+        print(f"\n  Sample messages:")
+        for uid in uids[:5]:
+            _, d = conn.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+            m = emaillib.message_from_bytes(d[0][1])
+            print(f"    - {decode_header_value(m.get('Subject', '(no subject)'))[:60]}")
+        if count > 5:
+            print(f"    ... and {count - 5} more")
+
+        print(f"\n  ⚠️  This cannot be undone{'' if opts.permanent else ' easily'}.")
+        confirm = input(f"\n  Type YES to confirm: ").strip()
+        if confirm != "YES":
+            print("Cancelled."); conn.logout(); return
+
+        if opts.permanent:
+            conn.store("1:*", "+FLAGS", "\\Deleted")
+            conn.expunge()
+        else:
+            for uid in uids:
+                conn.copy(uid, trash)
+            conn.store("1:*", "+FLAGS", "\\Deleted")
+            conn.expunge()
+        print(f"✓ {count} message(s) {'permanently deleted' if opts.permanent else f'moved to {trash}'}.")
+
+    conn.logout()
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -461,6 +540,7 @@ def main():
         elif sub == "read":      cmd_email_read(cfg, sub_args)
         elif sub == "send":      cmd_email_send(cfg, sub_args)
         elif sub == "draft":     cmd_email_draft(cfg, sub_args)
+        elif sub == "delete":    cmd_email_delete(cfg, sub_args)
         elif sub == "attachment":cmd_email_attachment(cfg, sub_args)
         else:
             print(f"Unknown subcommand: {sub}", file=sys.stderr); sys.exit(1)

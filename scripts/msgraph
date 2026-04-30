@@ -308,6 +308,61 @@ def cmd_email_draft(args):
     result = graph("POST", "/me/messages", draft)
     print(f"Draft created: [{short_id(result.get('id',''))}]  full-id: {result.get('id')}")
 
+def cmd_email_delete(args):
+    import argparse
+    p = argparse.ArgumentParser(prog="msgraph email delete")
+    p.add_argument("id",         nargs="?",       help="Short or full message ID to delete")
+    p.add_argument("--all",      action="store_true", help="Delete all messages in folder")
+    p.add_argument("--folder",   default="inbox", help="Folder to delete from (default: inbox)")
+    p.add_argument("--permanent",action="store_true", help="Permanently delete (skip Deleted Items)")
+    opts = p.parse_args(args)
+
+    if not opts.id and not opts.all:
+        print("Usage: msgraph email delete <id>  OR  msgraph email delete --all [--folder inbox] [--permanent]",
+              file=sys.stderr); sys.exit(1)
+
+    if opts.id:
+        full_id = resolve_id(opts.id)
+        msg     = graph("GET", f"/me/messages/{full_id}?$select=subject,from")
+        subject = msg.get("subject", "(no subject)")
+        sender  = msg.get("from", {}).get("emailAddress", {}).get("address", "?")
+        print(f"Deleting: [{short_id(full_id)}] {sender} — {subject}")
+
+        if opts.permanent:
+            graph("DELETE", f"/me/messages/{full_id}")
+            print("Permanently deleted.")
+        else:
+            graph("POST", f"/me/messages/{full_id}/move", {"destinationId": "deleteditems"})
+            print("Moved to Deleted Items.")
+
+    elif opts.all:
+        result = graph("GET", f"/me/mailFolders/{opts.folder}/messages?$top=500&$select=id,subject,from")
+        msgs   = result.get("value", [])
+        count  = len(msgs)
+        if count == 0:
+            print(f"{opts.folder} is already empty."); return
+
+        print(f"\n  You are about to delete {count} message(s) from {opts.folder}.")
+        print(f"  Destination: {'permanent (unrecoverable)' if opts.permanent else 'Deleted Items'}")
+        print(f"\n  Sample messages:")
+        for m in msgs[:5]:
+            print(f"    - {m.get('subject','(no subject)')[:60]}")
+        if count > 5:
+            print(f"    ... and {count - 5} more")
+
+        print(f"\n  ⚠️  This cannot be undone{'' if opts.permanent else ' easily'}.")
+        confirm = input("\n  Type YES to confirm: ").strip()
+        if confirm != "YES":
+            print("Cancelled."); return
+
+        dest = "deleteditems"
+        for m in msgs:
+            if opts.permanent:
+                graph("DELETE", f"/me/messages/{m['id']}")
+            else:
+                graph("POST", f"/me/messages/{m['id']}/move", {"destinationId": dest})
+        print(f"✓ {count} message(s) {'permanently deleted' if opts.permanent else 'moved to Deleted Items'}.")
+
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
 def cmd_calendar_list(args):
@@ -353,6 +408,7 @@ COMMANDS = {
     ("email",    "read"):        cmd_email_read,
     ("email",    "send"):        cmd_email_send,
     ("email",    "draft"):       cmd_email_draft,
+    ("email",    "delete"):      cmd_email_delete,
     ("email",    "attachment"):  lambda a: cmd_attachment_download(a),
     ("calendar", "list"):        cmd_calendar_list,
     ("calendar", "create"):      cmd_calendar_create,

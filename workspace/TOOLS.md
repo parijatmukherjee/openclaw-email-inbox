@@ -9,6 +9,18 @@ Two CLIs are available:
 
 ---
 
+## CRITICAL RULES
+
+### Sending
+Always draft before sending — never send without explicit user approval (see Sending section below).
+
+### Deleting
+- **Single email**: show the subject and sender, confirm with the user before deleting.
+- **Bulk delete (`--all`)**: show count + sample subjects, require the user to explicitly say "yes delete them all" or similar. Never bulk delete without clear confirmation.
+- Default is move to Trash (recoverable). Only use `--permanent` if the user explicitly says "permanently" or "forever".
+
+---
+
 ## CRITICAL RULE — Always Draft Before Sending
 
 **Never send an email directly. Always:**
@@ -36,6 +48,9 @@ msgraph email send \
   [--attach /path/to/file] \
   [--attach-url "https://..."]
 msgraph email attachment <msg-id> <att-id> [--out filename]   # download attachment
+msgraph email delete <id>                                     # move to Deleted Items
+msgraph email delete <id> --permanent                         # permanently delete
+msgraph email delete --all [--folder inbox] [--permanent]     # bulk delete (requires YES confirmation)
 
 msgraph calendar list [days]                 # upcoming events (default: 7 days)
 msgraph calendar create \
@@ -61,6 +76,9 @@ emctl email list sent
 emctl email list drafts
 emctl email read <uid>                       # read message + list attachments
 emctl email attachment <uid> <index> [--out filename]   # download by index number
+emctl email delete <uid>                                # move to Trash
+emctl email delete <uid> --permanent                    # permanently delete
+emctl email delete --all [--folder INBOX] [--permanent] # bulk delete (requires YES confirmation)
 emctl email draft \
   --to "addr" --subject "..." --body "..." \
   [--attach /path/to/file] \
