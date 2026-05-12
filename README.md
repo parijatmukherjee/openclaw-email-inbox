@@ -1,4 +1,4 @@
-# openclaw-email-inbox
+# openclaw-email-inbox — Email # openclaw-email-inbox Calendar Integration for OpenClaw (Outlook, Gmail, GMX)
 
 Unified email integration for [OpenClaw](https://openclaw.dev) agents via IMAP/SMTP.
 
